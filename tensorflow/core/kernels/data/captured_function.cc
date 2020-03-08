@@ -101,7 +101,7 @@ class SimpleStepStatsCollector : public StepStatsCollectorInterface {
   };
 
   mutex mu_;
-  int64 processing_time_ GUARDED_BY(mu_) = 0;
+  int64 processing_time_ TF_GUARDED_BY(mu_) = 0;
 };
 
 Status RunShortCircuit(const ShortCircuitInfo& info,
@@ -430,15 +430,6 @@ Status MakeIteratorFromInputElement(
   return returned_dataset->MakeIterator(
       ctx, parent, strings::StrCat(prefix, "[", thread_index, "]"),
       out_iterator);
-}
-
-Status MakeIteratorFromInputElement(
-    IteratorContext* ctx, const std::vector<Tensor>& input_element,
-    int64 thread_index, const InstantiatedCapturedFunction& inst_captured_func,
-    StringPiece prefix, std::unique_ptr<IteratorBase>* out_iterator) {
-  return MakeIteratorFromInputElement(ctx, /*parent=*/nullptr, input_element,
-                                      thread_index, inst_captured_func, prefix,
-                                      out_iterator);
 }
 
 /* static */

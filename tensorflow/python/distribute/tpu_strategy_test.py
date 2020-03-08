@@ -23,11 +23,9 @@ from tensorflow.python.distribute.cluster_resolver import tpu_cluster_resolver
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import remote
 from tensorflow.python.eager import test
-from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import flags
 from tensorflow.python.platform import tf_logging as logging
@@ -57,7 +55,7 @@ def get_tpu_strategy():
   return tpu_lib.TPUStrategy(resolver)
 
 
-class TpuStrategyTest(test.TestCase):
+class TPUStrategyTest(test.TestCase):
 
   def test_multiple_initialize_system(self):
     resolver = get_tpu_cluster_resolver()
@@ -67,33 +65,6 @@ class TpuStrategyTest(test.TestCase):
     with test.mock.patch.object(logging, "warning") as mock_log:
       tpu_strategy_util.initialize_tpu_system(resolver)
       self.assertRegex(str(mock_log.call_args), "already been initialized")
-
-  def test_recover_from_compilation_failures(self):
-    strategy = get_tpu_strategy()
-
-    @def_function.function
-    def compilation_failure_run():
-
-      def computation():
-        samples = random_ops.random_gamma([10], [0.5, 1.5])
-        return samples
-
-      return strategy.experimental_run_v2(computation)
-
-    with self.assertRaisesRegexp(errors.InvalidArgumentError,
-                                 "TPU compilation failed"):
-      compilation_failure_run()
-
-    @def_function.function
-    def good_run():
-
-      def computation():
-        samples = random_ops.random_normal([10])
-        return samples
-
-      return strategy.experimental_run_v2(computation)
-
-    good_run()
 
   def test_sequential_experimental_runs(self):
     resolver = get_tpu_cluster_resolver()

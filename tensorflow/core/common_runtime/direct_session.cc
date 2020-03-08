@@ -236,8 +236,9 @@ class DirectSessionFactory : public SessionFactory {
   }
 
   mutex sessions_lock_;
-  std::vector<DirectSession*> sessions_ GUARDED_BY(sessions_lock_);
-  absl::flat_hash_set<string> session_metadata_keys_ GUARDED_BY(sessions_lock_);
+  std::vector<DirectSession*> sessions_ TF_GUARDED_BY(sessions_lock_);
+  absl::flat_hash_set<string> session_metadata_keys_
+      TF_GUARDED_BY(sessions_lock_);
 };
 
 class DirectSessionRegistrar {
@@ -592,7 +593,9 @@ Status DirectSession::RunInternal(
   if (ShouldUseRunHandlerPool(run_options) &&
       run_options.experimental().use_run_handler_pool()) {
     VLOG(1) << "Using RunHandler to scheduler inter-op closures.";
-    handler = GetOrCreateRunHandlerPool(options_)->Get(step_id, call_timeout);
+    handler = GetOrCreateRunHandlerPool(options_)->Get(
+        step_id, call_timeout,
+        run_options.experimental().run_handler_pool_options());
     if (!handler) {
       return errors::DeadlineExceeded(
           "Could not obtain RunHandler for request after waiting for ",

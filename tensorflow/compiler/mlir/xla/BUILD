@@ -34,6 +34,7 @@ filegroup(
         "ir/hlo_utils.td",
         "ir/lhlo_ops.td",
         "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:include/mlir/Analysis/InferTypeOpInterface.td",
     ],
 )
 
@@ -127,6 +128,43 @@ cc_library(
         "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "xla_legalize_tf_with_tf2xla",
+    srcs = [
+        "transforms/legalize_tf_with_tf2xla.cc",
+    ],
+    deps = [
+        ":hlo",
+        ":mlir_hlo_builder",
+        "//tensorflow/compiler/jit:xla_cpu_device",
+        "//tensorflow/compiler/jit:xla_cpu_jit",
+        "//tensorflow/compiler/mlir:op_or_arg_name_mapper",
+        "//tensorflow/compiler/mlir/tensorflow",
+        "//tensorflow/compiler/mlir/tensorflow:convert_type",
+        "//tensorflow/compiler/mlir/tensorflow:export_tf_dialect_op",
+        "//tensorflow/compiler/mlir/tensorflow:lower_tf_lib",
+        "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops_inc_gen",
+        "//tensorflow/compiler/mlir/tensorflow:translate_utils",
+        "//tensorflow/compiler/tf2xla:xla_compiler",
+        "//tensorflow/compiler/xla/client:xla_builder",
+        "//tensorflow/core:core_cpu_lib",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_internal",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:session_options",
+        "//tensorflow/stream_executor:timer",
+        "//tensorflow/stream_executor/lib",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/memory",
+        "@llvm-project//llvm:support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
     ],
     alwayslink = 1,
 )
@@ -232,6 +270,19 @@ cc_library(
         "@llvm-project//mlir:LinalgTransforms",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:TransformUtils",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "lhlo_copy_removal",
+    srcs = ["transforms/lhlo_copy_removal.cc"],
+    deps = [
+        ":lhlo",
+        "@com_google_absl//absl/memory",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:StandardOps",
     ],
     alwayslink = 1,
 )
@@ -353,7 +404,9 @@ cc_library(
     ],
     deps = [
         ":hlo",
+        "@llvm-project//llvm:support",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Transforms",
     ],
 )
@@ -407,6 +460,31 @@ cc_library(
         "@llvm-project//mlir:Transforms",
     ],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "mlir_hlo_builder",
+    srcs = [
+        "ir/mlir_hlo_builder.cc",
+    ],
+    hdrs = [
+        "ir/mlir_hlo_builder.h",
+    ],
+    deps = [
+        ":hlo",
+        ":hlo_utils",
+        ":type_to_shape",
+        "//tensorflow/compiler/xla:shape_util",
+        "//tensorflow/compiler/xla:types",
+        "//tensorflow/compiler/xla/client:xla_builder",
+        "//tensorflow/compiler/xla/service:hlo",
+        "//tensorflow/compiler/xla/service:shape_inference",
+        "//tensorflow/core/platform:types",
+        "//tensorflow/stream_executor/lib",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@llvm-project//llvm:support",
+        "@llvm-project//mlir:IR",
+    ],
 )
 
 cc_library(
@@ -609,6 +687,7 @@ tf_native_cc_binary(
 genrule(
     name = "operator_writer_inc",
     srcs = [
+        "@llvm-project//mlir:include/mlir/Analysis/InferTypeOpInterface.td",
         "@llvm-project//mlir:include/mlir/IR/OpBase.td",
         ":ir/hlo_ops.td",
         ":ir/hlo_ops_base.td",
