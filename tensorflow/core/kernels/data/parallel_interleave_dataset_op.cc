@@ -172,8 +172,10 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         traceme_metadata_(
             {{"autotune",
               num_parallel_calls == model::kAutotune ? "true" : "false"},
-             {"block_length", strings::Printf("%lld", block_length)},
-             {"cycle_length", strings::Printf("%lld", cycle_length)},
+             {"block_length",
+              strings::Printf("%lld", static_cast<long long>(block_length))},
+             {"cycle_length",
+              strings::Printf("%lld", static_cast<long long>(cycle_length))},
              {"deterministic",
               deterministic.IsNondeterministic() ? "false" : "true"}}) {
     input_->Ref();
@@ -467,8 +469,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         mu_->unlock();
       }
       auto result = dataset()->traceme_metadata_;
-      result.push_back(
-          std::make_pair("parallelism", strings::Printf("%lld", parallelism)));
+      result.push_back(std::make_pair(
+          "parallelism",
+          strings::Printf("%lld", static_cast<long long>(parallelism))));
       return result;
     }
 
@@ -1489,10 +1492,8 @@ ParallelInterleaveDatasetOp::ParallelInterleaveDatasetOp(
     OpKernelConstruction* ctx)
     : UnaryDatasetOpKernel(ctx),
       op_version_(OpVersionFromOpName(ctx->def().op())) {
-  FunctionMetadata::Params params;
-  params.is_multi_device_function = true;
-  OP_REQUIRES_OK(ctx,
-                 FunctionMetadata::Create(ctx, kFunc, params, &func_metadata_));
+  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kFunc, /*params=*/{},
+                                               &func_metadata_));
   OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputTypes, &output_types_));
   OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputShapes, &output_shapes_));
   if (op_version_ == 2) {

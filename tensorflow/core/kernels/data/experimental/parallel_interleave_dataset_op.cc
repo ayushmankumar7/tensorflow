@@ -107,8 +107,10 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         output_types_(output_types),
         output_shapes_(output_shapes),
         traceme_metadata_(
-            {{"block_length", strings::Printf("%lld", block_length)},
-             {"cycle_length", strings::Printf("%lld", cycle_length)},
+            {{"block_length",
+              strings::Printf("%lld", static_cast<long long>(block_length))},
+             {"cycle_length",
+              strings::Printf("%lld", static_cast<long long>(cycle_length))},
              {"deterministic",
               deterministic.IsDeterministic() || deterministic.IsDefault()
                   ? "true"
@@ -1143,10 +1145,8 @@ ParallelInterleaveDatasetOp::ParallelInterleaveDatasetOp(
     OpKernelConstruction* ctx)
     : UnaryDatasetOpKernel(ctx),
       op_version_(ctx->HasAttr(kDeterministic) ? 2 : 1) {
-  FunctionMetadata::Params params;
-  params.is_multi_device_function = true;
-  OP_REQUIRES_OK(ctx,
-                 FunctionMetadata::Create(ctx, kFunc, params, &func_metadata_));
+  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kFunc, /*params=*/{},
+                                               &func_metadata_));
   if (op_version_ == 2) {
     std::string deterministic;
     OP_REQUIRES_OK(ctx, ctx->GetAttr(kDeterministic, &deterministic));
