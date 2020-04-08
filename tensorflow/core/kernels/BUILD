@@ -982,14 +982,7 @@ ARRAY_DEPS = [
     "//tensorflow/core:lib_internal",
     "//tensorflow/core:protos_all_cc",
     "//third_party/eigen3",
-] + if_sycl(["//tensorflow/core:sycl_runtime"])
-
-cc_library(
-    name = "array_not_windows",
-    deps = [
-        ":immutable_constant_op",
-    ],
-)
+] + if_sycl(["//tensorflow/core/common_runtime/sycl:sycl_runtime"])
 
 tf_kernel_library(
     name = "immutable_constant_op",
@@ -1036,6 +1029,7 @@ cc_library(
         ":host_constant_op",
         ":identity_n_op",
         ":identity_op",
+        ":immutable_constant_op",
         ":inplace_ops",
         ":listdiff_op",
         ":matrix_band_part_op",
@@ -1320,7 +1314,23 @@ tf_kernel_library(
 
 tf_kernel_library(
     name = "tile_ops",
-    srcs = ["tile_functor_cpu.cc"],
+    srcs = [
+        "tile_functor_cpu.h",
+        "tile_functor_cpu_bfloat16.cc",
+        "tile_functor_cpu_bool.cc",
+        "tile_functor_cpu_complex128.cc",
+        "tile_functor_cpu_complex64.cc",
+        "tile_functor_cpu_double.cc",
+        "tile_functor_cpu_float.cc",
+        "tile_functor_cpu_half.cc",
+        "tile_functor_cpu_int16.cc",
+        "tile_functor_cpu_int32.cc",
+        "tile_functor_cpu_int64.cc",
+        "tile_functor_cpu_int8.cc",
+        "tile_functor_cpu_tstring.cc",
+        "tile_functor_cpu_uint8.cc",
+        "tile_functor_sycl.cc",
+    ],
     hdrs = ["tile_functor.h"],
     gpu_srcs = [
         "tile_functor.h",
@@ -3922,13 +3932,6 @@ MATH_DEPS = [
     "//third_party/eigen3",
 ]
 
-cc_library(
-    name = "math_not_windows",
-    deps = [
-        ":sparse_matmul_op",
-    ],
-)
-
 tf_kernel_library(
     name = "sparse_matmul_op",
     defines = select({
@@ -3967,6 +3970,7 @@ cc_library(
         ":scan_ops",
         ":segment_reduction_ops",
         ":sequence_ops",
+        ":sparse_matmul_op",
         "//tensorflow/core/kernels/special_math:special_math_op",
     ],
 )
@@ -5221,6 +5225,15 @@ tf_cuda_cc_test(
     ],
 )
 
+cc_library(
+    name = "stateful_random_ops_header",
+    hdrs = ["stateful_random_ops.h"],
+    deps = [
+        "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
+    ],
+)
+
 tf_kernel_library(
     name = "stateful_random_ops",
     prefix = "stateful_random_ops",
@@ -5233,6 +5246,7 @@ tf_kernel_library(
         ":resource_variable_ops",
         ":scatter_functor",
         ":state",
+        ":stateful_random_ops_header",
         ":training_op_helpers",
         ":variable_ops",
         "//tensorflow/core:core_cpu",
@@ -5620,7 +5634,7 @@ STATE_DEPS = [
     "//tensorflow/core:framework",
     "//tensorflow/core:lib",
     "//tensorflow/core:lib_internal",
-] + if_sycl(["//tensorflow/core:sycl_runtime"])
+] + if_sycl(["//tensorflow/core/common_runtime/sycl:sycl_runtime"])
 
 tf_kernel_library(
     name = "count_up_to_op",
@@ -6565,6 +6579,7 @@ filegroup(
         "data_format_ops.h",
         "depthtospace_op.h",
         "depthwise_conv_op.h",
+        "extract_image_patches_op.h",
         "fake_quant_ops_functor.h",
         "fused_batch_norm_op.h",
         "gemm_functors.h",
@@ -6748,6 +6763,7 @@ filegroup(
         "decode_bmp_op.cc",
         "depthtospace_op.cc",
         "dynamic_stitch_op.cc",
+        "extract_image_patches_op.cc",
         "fft_ops.cc",
         "in_topk_op.cc",
         "in_topk_op.h",
@@ -6833,7 +6849,20 @@ filegroup(
         "summary_op.cc",
         "tensor_array.cc",
         "tensor_array_ops.cc",
-        "tile_functor_cpu.cc",
+        "tile_functor_cpu.h",
+        "tile_functor_cpu_bfloat16.cc",
+        "tile_functor_cpu_bool.cc",
+        "tile_functor_cpu_complex128.cc",
+        "tile_functor_cpu_complex64.cc",
+        "tile_functor_cpu_double.cc",
+        "tile_functor_cpu_float.cc",
+        "tile_functor_cpu_half.cc",
+        "tile_functor_cpu_int16.cc",
+        "tile_functor_cpu_int32.cc",
+        "tile_functor_cpu_int64.cc",
+        "tile_functor_cpu_int8.cc",
+        "tile_functor_cpu_tstring.cc",
+        "tile_functor_cpu_uint8.cc",
         "tile_ops.cc",
         "tile_ops_cpu_impl_1.cc",
         "tile_ops_cpu_impl_2.cc",

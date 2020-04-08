@@ -18,15 +18,15 @@ limitations under the License.
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // TF:llvm-project
-#include "mlir/IR/Attributes.h"  // TF:llvm-project
-#include "mlir/IR/Builders.h"  // TF:llvm-project
-#include "mlir/IR/Function.h"  // TF:llvm-project
-#include "mlir/IR/Module.h"  // TF:llvm-project
-#include "mlir/IR/StandardTypes.h"  // TF:llvm-project
-#include "mlir/IR/TypeUtilities.h"  // TF:llvm-project
-#include "mlir/Pass/Pass.h"  // TF:llvm-project
-#include "mlir/Support/LogicalResult.h"  // TF:llvm-project
+#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/IR/Attributes.h"  // from @llvm-project
+#include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/IR/Function.h"  // from @llvm-project
+#include "mlir/IR/Module.h"  // from @llvm-project
+#include "mlir/IR/StandardTypes.h"  // from @llvm-project
+#include "mlir/IR/TypeUtilities.h"  // from @llvm-project
+#include "mlir/Pass/Pass.h"  // from @llvm-project
+#include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
@@ -62,8 +62,8 @@ namespace cutil = TF::collection_ops_util;
 //
 // The pass also works across control flow and functional calls.
 struct TensorListOpsDecompositionPass
-    : public ModulePass<TensorListOpsDecompositionPass> {
-  void runOnModule() override;
+    : public OperationPass<TensorListOpsDecompositionPass, ModuleOp> {
+  void runOnOperation() override;
 };
 
 // Updates func's type according to its current arguments and return values.
@@ -574,6 +574,37 @@ LogicalResult HandleTensorListLengthOp(
   return success();
 }
 
+LogicalResult HandleTensorListElementShapeOp(
+    TF::TensorListElementShapeOp elem_shape,
+    const llvm::SmallDenseMap<Value, SizeInfo>& buffer_to_size) {
+  if (buffer_to_size.count(elem_shape.input_handle()) == 0) {
+    return elem_shape.emitOpError("unknown tensor list");
+  }
+  auto buffer = elem_shape.input_handle();
+  auto result = cutil::GetR1Const(
+      buffer.getType().cast<RankedTensorType>().getShape().drop_front(),
+      OpBuilder(elem_shape), elem_shape.getLoc(),
+      elem_shape.shape_type().getIntOrFloatBitWidth());
+  elem_shape.element_shape().replaceAllUsesWith(result);
+  elem_shape.erase();
+  return success();
+}
+
+LogicalResult HandleTensorListGatherOp(
+    TF::TensorListGatherOp gather,
+    const llvm::SmallDenseMap<Value, SizeInfo>& buffer_to_size) {
+  auto it = buffer_to_size.find(gather.input_handle());
+  if (it == buffer_to_size.end()) {
+    return gather.emitOpError("unknown tensor list");
+  }
+  auto buffer = gather.input_handle();
+  auto result = cutil::GatherElements(gather.indices(), buffer,
+                                      OpBuilder(gather), gather.getLoc());
+  gather.values().replaceAllUsesWith(result);
+  gather.erase();
+  return success();
+}
+
 LogicalResult DecomposeTensorListOpsInternal(
     Block* block, ModuleOp module,
     llvm::SmallDenseMap<Value, SizeInfo>* buffer_to_size,
@@ -619,6 +650,15 @@ LogicalResult DecomposeTensorListOpsInternal(
     } else if (auto stack = llvm::dyn_cast<TF::TensorListStackOp>(&op)) {
       stack.tensor().replaceAllUsesWith(stack.input_handle());
       stack.erase();
+    } else if (auto elem_shape =
+                   llvm::dyn_cast<TF::TensorListElementShapeOp>(&op)) {
+      if (failed(HandleTensorListElementShapeOp(elem_shape, *buffer_to_size))) {
+        return failure();
+      }
+    } else if (auto gather = llvm::dyn_cast<TF::TensorListGatherOp>(&op)) {
+      if (failed(HandleTensorListGatherOp(gather, *buffer_to_size))) {
+        return failure();
+      }
     } else if (auto addn = llvm::dyn_cast<TF::AddNOp>(&op)) {
       auto it = buffer_to_size->find(addn.getOperand(0));
       if (it != buffer_to_size->end()) {
@@ -671,8 +711,8 @@ LogicalResult DecomposeTensorListOps(Block* block, ModuleOp module) {
                                         &decomposed_partitioned_call_callees);
 }
 
-void TensorListOpsDecompositionPass::runOnModule() {
-  auto module = getModule();
+void TensorListOpsDecompositionPass::runOnOperation() {
+  auto module = getOperation();
   auto main = module.lookupSymbol<FuncOp>("main");
   if (!main) return;
   if (failed(DecomposeTensorListOps(&main.front(), module))) {

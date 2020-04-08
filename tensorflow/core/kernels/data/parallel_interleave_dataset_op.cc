@@ -377,8 +377,10 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
 
     // TODO(aaudibert): Refactor the implementations to avoid the need for
     // `IteratorContext` when saving the state of the iterator.
-    Status SaveInternal(IteratorStateWriter* writer) override {
-      TF_RETURN_IF_ERROR(dataset()->captured_func_->CheckExternalState());
+    Status SaveInternal(SerializationContext* ctx,
+                        IteratorStateWriter* writer) override {
+      TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
+          dataset()->captured_func_->CheckExternalState()));
       mutex_lock l(*mu_);
       wait_for_checkpoint_ = true;
       // Wait for all in-flight calls to complete.
@@ -400,7 +402,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       wait_for_checkpoint_ = false;
       DCHECK_EQ(num_active_workers_, 0);
       VLOG(4) << "State before save:\n" << DebugString();
-      TF_RETURN_IF_ERROR(SaveInput(writer, input_impl_));
+      TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
       TF_RETURN_IF_ERROR(
           writer->WriteScalar(prefix(), kBlockIndex, block_index_));
       TF_RETURN_IF_ERROR(
@@ -410,8 +412,8 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       }
       TF_RETURN_IF_ERROR(writer->WriteScalar(prefix(), kElementIdCounter,
                                              element_id_counter_));
-      TF_RETURN_IF_ERROR(WriteCurrentElements(writer));
-      TF_RETURN_IF_ERROR(WriteFutureElements(writer));
+      TF_RETURN_IF_ERROR(WriteCurrentElements(ctx, writer));
+      TF_RETURN_IF_ERROR(WriteFutureElements(ctx, writer));
       // Wake workers back up.
       current_workers_cond_var_.notify_all();
       future_workers_cond_var_.notify_all();
@@ -447,7 +449,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           initial_elements_created_ = true;
         }
       }
-      for (auto element : future_elements_) {
+      for (const auto& element : future_elements_) {
         element->initialized = true;
       }
       last_valid_current_element_ = current_elements_.size() - 1;
@@ -536,7 +538,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       cancelled_ = true;
       // Wake up all threads so that they can exit. This will also wake up any
       // threads waiting in GetNextInternal.
-      for (auto element : current_elements_) {
+      for (const auto& element : current_elements_) {
         if (element) {
           element->cond_var.notify_all();
         }
@@ -1124,13 +1126,14 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       return absl::StrCat(kResultsSuffix, "[", idx, "]", kErrorMessageSuffix);
     }
 
-    Status WriteElement(std::shared_ptr<Element> element, int idx,
+    Status WriteElement(SerializationContext* ctx,
+                        std::shared_ptr<Element> element, int idx,
                         const string& key_prefix, IteratorStateWriter* writer)
         TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
       const auto& iterator_name =
           absl::StrCat(prefix(), "::", key_prefix, "::", idx);
       if (element->iterator) {
-        TF_RETURN_IF_ERROR(SaveInput(writer, element->iterator));
+        TF_RETURN_IF_ERROR(SaveInput(ctx, writer, element->iterator));
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(iterator_name, kIdSuffix, element->id));
         TF_RETURN_IF_ERROR(writer->WriteScalar(
@@ -1165,26 +1168,28 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       return Status::OK();
     }
 
-    Status WriteCurrentElements(IteratorStateWriter* writer)
+    Status WriteCurrentElements(SerializationContext* ctx,
+                                IteratorStateWriter* writer)
         TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
       TF_RETURN_IF_ERROR(writer->WriteScalar(prefix(), kCurrentElementsSize,
                                              current_elements_.size()));
       for (int idx = 0; idx < current_elements_.size(); idx++) {
         if (current_elements_[idx]) {
-          TF_RETURN_IF_ERROR(WriteElement(current_elements_[idx], idx,
+          TF_RETURN_IF_ERROR(WriteElement(ctx, current_elements_[idx], idx,
                                           kCurrentElements, writer));
         }
       }
       return Status::OK();
     }
 
-    Status WriteFutureElements(IteratorStateWriter* writer)
+    Status WriteFutureElements(SerializationContext* ctx,
+                               IteratorStateWriter* writer)
         TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
       TF_RETURN_IF_ERROR(writer->WriteScalar(prefix(), kFutureElementsSize,
                                              future_elements_.size()));
       for (int idx = 0; idx < future_elements_.size(); idx++) {
         if (future_elements_[idx]) {
-          TF_RETURN_IF_ERROR(WriteElement(future_elements_[idx], idx,
+          TF_RETURN_IF_ERROR(WriteElement(ctx, future_elements_[idx], idx,
                                           kFutureElements, writer));
         }
       }
