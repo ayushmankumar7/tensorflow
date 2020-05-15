@@ -1116,6 +1116,13 @@ class Context(object):
 
     return function_def
 
+  def register_custom_device(self, device_capsule, device_name,
+                             device_info_capsule):
+    """Calls TFE_RegisterCustomDevice. See the non-member function."""
+    self.ensure_initialized()
+    pywrap_tfe.TFE_Py_RegisterCustomDevice(self._handle, device_capsule,
+                                           device_name, device_info_capsule)
+
   def remove_function(self, name):
     """Remove a function from the context.
 
@@ -1502,9 +1509,11 @@ class Context(object):
     return self.config.allow_soft_placement
 
   @soft_device_placement.setter
-  def soft_device_placement(self, enabled):
-    self._soft_device_placement = enabled
+  def soft_device_placement(self, enable):
+    if self._context_handle is not None:
+      pywrap_tfe.TFE_ContextSetSoftDevicePlacement(self._handle, enable)
 
+    self._soft_device_placement = enable
     self._thread_local_data.function_call_options = None
 
   @property
@@ -1512,15 +1521,11 @@ class Context(object):
     return self.config.log_device_placement
 
   @log_device_placement.setter
-  def log_device_placement(self, enabled):
-    if self._log_device_placement == enabled:
-      return
-
+  def log_device_placement(self, enable):
     if self._context_handle is not None:
-      raise RuntimeError(
-          "Device placement logging must be set at program startup")
+      pywrap_tfe.TFE_ContextSetLogDevicePlacement(self._handle, enable)
 
-    self._log_device_placement = enabled
+    self._log_device_placement = enable
     self._thread_local_data.function_call_options = None
 
   @property
@@ -1786,7 +1791,7 @@ def executing_eagerly():
   cases.
 
   *  Executing inside `tf.function`, unless under `tf.init_scope` or
-     `tf.config.experimental_run_functions_eagerly(True)` is previously called.
+     `tf.config.run_functions_eagerly(True)` is previously called.
   *  Executing inside a transformation function for `tf.dataset`.
   *  `tf.compat.v1.disable_eager_execution()` is called.
 
@@ -1808,8 +1813,8 @@ def executing_eagerly():
 
   Inside `tf.function` after
 
-  `tf.config.experimental_run_functions_eagerly(True)` is called:
-  >>> tf.config.experimental_run_functions_eagerly(True)
+  `tf.config.run_functions_eagerly(True)` is called:
+  >>> tf.config.run_functions_eagerly(True)
   >>> @tf.function
   ... def fn():
   ...   with tf.init_scope():
@@ -1818,7 +1823,7 @@ def executing_eagerly():
   >>> fn()
   True
   True
-  >>> tf.config.experimental_run_functions_eagerly(False)
+  >>> tf.config.run_functions_eagerly(False)
 
   Inside a transformation function for `tf.dataset`:
 
@@ -1851,7 +1856,7 @@ def executing_eagerly_v1():
   this API might return `False` in the following use cases.
 
   *  Executing inside `tf.function`, unless under `tf.init_scope` or
-     `tf.config.experimental_run_functions_eagerly(True)` is previously called.
+     `tf.config.run_functions_eagerly(True)` is previously called.
   *  Executing inside a transformation function for `tf.dataset`.
   *  `tf.compat.v1.disable_eager_execution()` is called.
 
@@ -1874,9 +1879,9 @@ def executing_eagerly_v1():
   False
 
   Inside `tf.function`
-  after  `tf.config.experimental_run_functions_eagerly(True)` is called:
+  after  `tf.config.run_functions_eagerly(True)` is called:
 
-  >>> tf.config.experimental_run_functions_eagerly(True)
+  >>> tf.config.run_functions_eagerly(True)
   >>> @tf.function
   ... def fn():
   ...   with tf.init_scope():
@@ -1885,7 +1890,7 @@ def executing_eagerly_v1():
   >>> fn()
   True
   True
-  >>> tf.config.experimental_run_functions_eagerly(False)
+  >>> tf.config.run_functions_eagerly(False)
 
   Inside a transformation function for `tf.dataset`:
 
@@ -2285,6 +2290,32 @@ def remove_function(name):
 
 def get_function_def(name):
   return context().get_function_def(name)
+
+
+def register_custom_device(device_capsule, device_name, device_info_capsule):
+  """Calls TFE_RegisterCustomDevice to register a custom device with Python.
+
+  Enables using C extensions specifying a custom device from Python. See the
+  experimental eager C API in tensorflow/c/eager/c_api_experimental.h for
+  details.
+
+  Note that custom devices are not currently supported inside `tf.function`s.
+
+  Args:
+    device_capsule: A PyCapsule with the name set to 'TFE_CustomDevice'
+      containing a pointer to a TFE_CustomDevice struct. The capsule retains
+      ownership of the memory.
+    device_name: A string indicating the name to register the custom device
+      under, e.g. '/job:localhost/replica:0/task:0/device:CUSTOM:0'. It may
+      subsequently be passed to `with tf.device(...):`.
+    device_info_capsule: A PyCapsule with the name set to
+      'TFE_CustomDevice_DeviceInfo' containing a pointer to a device-specific
+      struct with the initial state of the custom device (the void* device_info
+      argument to TFE_RegisterCustomDevice). This method takes ownership of the
+      memory and clears the capsule destructor.
+  """
+  context().register_custom_device(device_capsule, device_name,
+                                   device_info_capsule)
 
 
 # Not every user creates a Context via context.context()

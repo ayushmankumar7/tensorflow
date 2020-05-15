@@ -158,8 +158,15 @@ def _sequence_like(instance, args):
     instance_type = type(instance)
     tf_logging.log_first_n(
         tf_logging.WARN, "Mapping types may not work well with tf.nest. Prefer"
-        "using MutableMapping for {}".format(instance_type), 1)
-    return instance_type((key, result[key]) for key in instance)
+        " using MutableMapping for {}".format(instance_type), 1)
+    try:
+      return instance_type((key, result[key]) for key in instance)
+    except TypeError as err:
+      raise TypeError("Error creating an object of type {} like {}. Note that "
+                      "it must accept a single positional argument "
+                      "representing an iterable of key-value pairs, in "
+                      "addition to self. Cause: {}".format(
+                          type(instance), instance, err))
   elif _is_mapping_view(instance):
     # We can't directly construct mapping views, so we create a list instead
     return list(args)
@@ -224,7 +231,7 @@ def _yield_sorted_items(iterable):
       yield field, getattr(iterable, field)
   elif _is_composite_tensor(iterable):
     type_spec = iterable._type_spec  # pylint: disable=protected-access
-    yield type(iterable).__name__, type_spec._to_components(iterable)  # pylint: disable=protected-access
+    yield type_spec.value_type.__name__, type_spec._to_components(iterable)  # pylint: disable=protected-access
   elif _is_type_spec(iterable):
     # Note: to allow CompositeTensors and their TypeSpecs to have matching
     # structures, we need to use the same key string here.

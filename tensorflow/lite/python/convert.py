@@ -108,18 +108,36 @@ class ConverterError(Exception):
   pass
 
 
-def mlir_quantize(input_data_str):
+def mlir_quantize(input_data_str, disable_per_channel=False,
+                  inference_type=_types_pb2.INT8):
   """Quantize `input_data_str` with calibration results.
 
   Args:
     input_data_str: Input data in serialized form (e.g. a TFLITE model with
                     calibration results).
+    disable_per_channel: Bool indicating whether to do per-channel or
+                         per-tensor quantization
+    inference_type: Data type for the activations. The default value is int8.
 
   Returns:
     Quantized model in serialized form (e.g. a TFLITE model) with floating-point
     inputs and outputs.
   """
-  return wrap_toco.wrapped_experimental_mlir_quantize(input_data_str)
+  return wrap_toco.wrapped_experimental_mlir_quantize(input_data_str,
+                                                      disable_per_channel,
+                                                      inference_type)
+
+
+def mlir_sparsify(input_data_str):
+  """Sparsify `input_data_str` to encode sparse tensor with proper format.
+
+  Args:
+    input_data_str: Input data in serialized form (e.g. a TFLITE model).
+
+  Returns:
+    Sparsified model in serialized form (e.g. a TFLITE model).
+  """
+  return wrap_toco.wrapped_experimental_mlir_sparsify(input_data_str)
 
 
 def toco_convert_protos(model_flags_str,
@@ -400,7 +418,10 @@ def build_toco_convert_protos(input_tensors,
   model.change_concat_input_ranges = change_concat_input_ranges
   for idx, input_tensor in enumerate(input_tensors):
     input_array = model.input_arrays.add()
-    input_array.name = util.get_tensor_name(input_tensor)
+    if saved_model_dir:
+      input_array.name = input_tensor.name
+    else:
+      input_array.name = util.get_tensor_name(input_tensor)
     input_array.data_type = util.convert_dtype_to_tflite_type(
         input_tensor.dtype)
 
@@ -423,7 +444,10 @@ def build_toco_convert_protos(input_tensors,
     input_array.shape.dims.extend(dims)
 
   for output_tensor in output_tensors:
-    model.output_arrays.append(util.get_tensor_name(output_tensor))
+    if saved_model_dir:
+      model.output_arrays.append(output_tensor.name)
+    else:
+      model.output_arrays.append(util.get_tensor_name(output_tensor))
 
   model.allow_nonexistent_arrays = allow_nonexistent_arrays
 

@@ -59,6 +59,7 @@ cuda_py_test(
     python_version = "PY3",
     tags = [
         "no_pip",
+        "no_rocm",
     ],
     deps = [
         ":profiler_v2",
@@ -225,6 +226,7 @@ py_library(
     deps = [
         "//tensorflow/python:util",
         "//tensorflow/python/profiler/internal:_pywrap_traceme",
+        "//tensorflow/python/types",
         "@six_archive//:six",
     ],
 )

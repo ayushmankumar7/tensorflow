@@ -8,6 +8,26 @@ package(
 exports_files(["LICENSE"])
 
 tf_py_test(
+    name = "categorical_encoding_benchmark",
+    srcs = ["categorical_encoding_benchmark.py"],
+    python_version = "PY3",
+    deps = [
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/python/keras/layers/preprocessing:categorical_encoding",
+    ],
+)
+
+tf_py_test(
+    name = "categorical_crossing_benchmark",
+    srcs = ["categorical_crossing_benchmark.py"],
+    python_version = "PY3",
+    deps = [
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/python/keras/layers/preprocessing:categorical_crossing",
+    ],
+)
+
+tf_py_test(
     name = "index_lookup_adapt_benchmark",
     srcs = ["index_lookup_adapt_benchmark.py"],
     python_version = "PY3",

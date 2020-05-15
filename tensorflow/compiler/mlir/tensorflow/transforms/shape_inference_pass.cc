@@ -47,7 +47,8 @@ namespace {
 
 // This transformation pass propagate shapes on the TensorFlow graph.
 // It is a ModulePass in order to be able to change function types.
-struct ShapeInference : public OperationPass<ShapeInference, ModuleOp> {
+struct ShapeInference
+    : public PassWrapper<ShapeInference, OperationPass<ModuleOp>> {
   void runOnOperation() override {
     auto module = getOperation();
     auto producer_or = tensorflow::GetTfGraphProducerVersion(module);
@@ -57,10 +58,8 @@ struct ShapeInference : public OperationPass<ShapeInference, ModuleOp> {
     }
     int64_t producer = producer_or.ValueOrDie();
     for (auto func : module.getOps<FuncOp>()) {
-      InferShapeUntilFixPoint(&func.getBody(), producer);
-      // TODO(yuanzx): Verify that it is always fine to refine a function's
-      // return type, as long as we do not change the argument shapes.
-      InferShapeForFunctionType(func);
+      if (failed(InferShapeForFunction(func, /*arg_shapes=*/{}, producer)))
+        return signalPassFailure();
     }
   }
 };
@@ -70,7 +69,7 @@ PassRegistration<ShapeInference> pass(
 
 }  // namespace
 
-std::unique_ptr<OpPassBase<ModuleOp>> CreateTFShapeInferencePass() {
+std::unique_ptr<OperationPass<ModuleOp>> CreateTFShapeInferencePass() {
   return std::make_unique<ShapeInference>();
 }
 

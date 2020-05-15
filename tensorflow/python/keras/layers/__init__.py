@@ -57,6 +57,7 @@ else:
   from tensorflow.python.keras.layers.preprocessing.text_vectorization_v1 import TextVectorization
   from tensorflow.python.keras.layers.preprocessing.text_vectorization import TextVectorization as TextVectorizationV2
   TextVectorizationV1 = TextVectorization
+from tensorflow.python.keras.layers.preprocessing.categorical_crossing import CategoryCrossing
 
 # Advanced activations.
 from tensorflow.python.keras.layers.advanced_activations import LeakyReLU
@@ -70,6 +71,7 @@ from tensorflow.python.keras.layers.advanced_activations import Softmax
 from tensorflow.python.keras.layers.convolutional import Conv1D
 from tensorflow.python.keras.layers.convolutional import Conv2D
 from tensorflow.python.keras.layers.convolutional import Conv3D
+from tensorflow.python.keras.layers.convolutional import Conv1DTranspose
 from tensorflow.python.keras.layers.convolutional import Conv2DTranspose
 from tensorflow.python.keras.layers.convolutional import Conv3DTranspose
 from tensorflow.python.keras.layers.convolutional import SeparableConv1D
@@ -117,6 +119,9 @@ from tensorflow.python.keras.layers.dense_attention import Attention
 
 # Embedding layers.
 from tensorflow.python.keras.layers.embeddings import Embedding
+
+# Einsum-based dense layer/
+from tensorflow.python.keras.layers.einsum_dense import EinsumDense
 
 # Locally-connected layers.
 from tensorflow.python.keras.layers.local import LocallyConnected1D

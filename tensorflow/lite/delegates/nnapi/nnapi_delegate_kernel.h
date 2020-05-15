@@ -338,6 +338,8 @@ class NNAPIDelegateKernel {
 
   std::vector<uint8_t> nn_compilation_cache_token_;
 
+  std::vector<int> nnapi_to_tflite_op_mapping_;
+
   void AddDequantizeOperatorsWhereNeeded(const TfLiteContext* context,
                                          int builtin_code,
                                          const TfLiteNode* node,
@@ -347,6 +349,7 @@ class NNAPIDelegateKernel {
   TfLiteStatus AddOpsAndTensors(TfLiteContext* context, int* nnapi_errno);
 
   TfLiteStatus BuildGraph(TfLiteContext* context,
+                          const StatefulNnApiDelegate::Options& options,
                           const TfLiteIntArray* input_tensors,
                           const TfLiteIntArray* output_tensors,
                           int* nnapi_errno);

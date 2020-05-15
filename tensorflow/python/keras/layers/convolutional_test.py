@@ -23,6 +23,8 @@ import numpy as np
 
 from tensorflow.python import keras
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_util
 from tensorflow.python.keras import keras_parameterized
 from tensorflow.python.keras import testing_utils
@@ -106,6 +108,26 @@ class Conv1DTest(keras_parameterized.TestCase):
       inpt2 = np.random.normal(size=[1, 1, 1])
       outp1_shape = layer(inpt1).shape
       _ = layer(inpt2).shape
+      self.assertEqual(outp1_shape, layer(inpt1).shape)
+
+  def test_conv1d_recreate_conv_unknown_dims(self):
+    with self.cached_session(use_gpu=True):
+      layer = keras.layers.Conv1D(filters=1,
+                                  kernel_size=3,
+                                  strides=1,
+                                  dilation_rate=2,
+                                  padding='causal')
+
+      inpt1 = np.random.normal(size=[1, 9, 1]).astype(np.float32)
+      inpt2 = np.random.normal(size=[1, 2, 1]).astype(np.float32)
+      outp1_shape = layer(inpt1).shape
+
+      @def_function.function(input_signature=[
+          tensor_spec.TensorSpec([1, None, 1])])
+      def fn(inpt):
+        return layer(inpt)
+
+      fn(inpt2)
       self.assertEqual(outp1_shape, layer(inpt1).shape)
 
 
@@ -274,6 +296,39 @@ class Conv3DTest(keras_parameterized.TestCase):
             },
             input_shape=(None, 3, None, None, None),
             input_data=input_data)
+
+
+@keras_parameterized.run_all_keras_modes
+class Conv1DTransposeTest(keras_parameterized.TestCase):
+
+  def _run_test(self, kwargs, expected_output_shape):
+    num_samples = 2
+    stack_size = 3
+    num_col = 6
+
+    with test_util.use_gpu():
+      testing_utils.layer_test(
+          keras.layers.Conv1DTranspose,
+          kwargs=kwargs,
+          input_shape=(num_samples, num_col, stack_size),
+          expected_output_shape=expected_output_shape)
+
+  @parameterized.named_parameters(
+      ('padding_valid', {'padding': 'valid'}, (None, 8, 2)),
+      ('padding_same', {'padding': 'same'}, (None, 6, 2)),
+      ('strides', {'strides': 2}, (None, 13, 2)),
+      # Only runs on GPU with CUDA, dilation_rate>1 is not supported on CPU.
+      ('dilation_rate', {'dilation_rate': 2}, (None, 10, 2)),
+      # Only runs on GPU with CUDA, channels_first is not supported on CPU.
+      # TODO(b/62340061): Support channels_first on CPU.
+      ('data_format', {'data_format': 'channels_first'}),
+  )
+  def test_conv1d_transpose(self, kwargs, expected_output_shape=None):
+    kwargs['filters'] = 2
+    kwargs['kernel_size'] = 3
+    if (('data_format' not in kwargs and 'dilation_rate' not in kwargs) or
+        test.is_gpu_available(cuda_only=True)):
+      self._run_test(kwargs, expected_output_shape)
 
 
 @keras_parameterized.run_all_keras_modes
