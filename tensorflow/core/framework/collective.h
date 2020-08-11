@@ -43,6 +43,7 @@ enum CollectiveType {
   REDUCTION_COLLECTIVE = 0,
   BROADCAST_COLLECTIVE,
   GATHER_COLLECTIVE,
+  PERMUTE_COLLECTIVE,
   UNDEFINED_COLLECTIVE,
 };
 
@@ -84,9 +85,12 @@ struct CollImplDetails {
       dependencies;           // collective instances on which this node depends
   string communication_hint;  // user-supplied hint for implementation choice,
                               // e.g. ring or nccl
+  float timeout_seconds;      // If non zero, set a completion timeout for the
+                              // collective op to detect staleness.
 };
 
 // Data common to all members of a collective instance.
+// TODO(b/163171014) Refactor this struct to not be a union of all fields.
 struct CollInstanceParams {
   // Identifies all participating graph nodes.
   int32 instance_key = -1;
@@ -107,6 +111,8 @@ struct CollInstanceParams {
   CollImplDetails impl_details;
   string ToString() const;
   CollInstanceParams& operator=(const struct CollInstanceParams& other);
+  std::vector<string> devices;   // all_permute only
+  std::vector<int> permutation;  // all_permute only
 };
 
 // Data common to all instance members in the same task.
@@ -186,6 +192,9 @@ class ParamResolverInterface {
                                      CompleteInstanceResponse* response,
                                      CancellationManager* cancel_mgr,
                                      const StatusCallback& done) = 0;
+
+  // Aborts the resolver. After abortion the resolver can no longer be used.
+  virtual void StartAbort(const Status& s) = 0;
 };
 
 // Graphs which utilize Collective Ops in a common instance must
@@ -379,7 +388,7 @@ class CollectiveContext {
 // implement this interface and register the implementation via the
 // CollectiveRegistry detailed below.  See common_runtime/ring_reducer and
 // common_runtime/hierarchical_tree_broadcaster for examples.
-class CollectiveImplementationInterface {
+class CollectiveImplementationInterface : public core::RefCounted {
  public:
   virtual ~CollectiveImplementationInterface() = default;
 
@@ -397,7 +406,8 @@ class CollectiveImplementationInterface {
   // Called from CollectiveExecutor right before calling Run().  The
   // CollectiveContext passed in must outlive the CollectiveImplementation
   // object.
-  virtual Status InitializeCollectiveContext(CollectiveContext* col_ctx) = 0;
+  virtual Status InitializeCollectiveContext(
+      std::shared_ptr<CollectiveContext> col_ctx) = 0;
 
   // Performs collective implementation specific group initialization.  The
   // intention is to do group-specific initialization of runtime details for the

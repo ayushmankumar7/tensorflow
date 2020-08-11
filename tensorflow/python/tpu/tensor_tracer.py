@@ -44,6 +44,7 @@ from tensorflow.python.ops import logging_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_impl
 from tensorflow.python.ops import state_ops
+from tensorflow.python.ops import string_ops
 from tensorflow.python.ops import summary_ops_v2 as summary
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.platform import analytics
@@ -100,7 +101,7 @@ _TT_TENSORBOARD_PLUGIN_NAME = 'tensor_tracer'
 _TT_HOSTCALL_KEY = 'tensor_tracer_host_call'
 _TT_EVENT_FILE_SUFFIX = '.tensor_tracer'
 
-_TT_SUMMARY_MAX_QUEUE = 100
+_TT_SUMMARY_MAX_QUEUE = 10
 
 
 def set_parameters(tensor_tracer_params=None):
@@ -206,6 +207,9 @@ def set_parameters(tensor_tracer_params=None):
           -> op2 -> op1 -> op0, if op0 has a NaN and trace_stack_size is 1, the
           result of op1 will also be printed. trace_stack_size is 2, the result
           of op1 and op2 will be printed.
+        - use_fingerprint_subdirectory: The trace directory will be chosen as
+          using the fingerprint of the trace metadata under the provided
+          trace_dir.
   """
   flags = '--%s=1' % tensor_tracer_flags.FLAG_NAME_ENABLE
   if tensor_tracer_params:
@@ -547,6 +551,7 @@ class TensorTracer(object):
     self._traced_op_names = set()
     self._report_proto = None
     self._temp_cache_var = []
+    self._report_proto_path = ''
 
   def report_proto(self):
     """Getter for tensor_tracer.proto object for summary and full_tensor_summary modes.
@@ -563,6 +568,14 @@ class TensorTracer(object):
       raise ValueError('Call to report_proto must be done after tracing.'
                        'Report proto only exists for '
                        'trace_mode=[summary|full_tensor_summary]')
+
+  def report_proto_path(self):
+    """Getter for path where tensor_tracer.proto object should be written.
+
+    Returns:
+      A string path.
+    """
+    return self._report_proto_path
 
   def _get_all_cache_variables(self):
     return self._cache_variables
@@ -1366,6 +1379,13 @@ class TensorTracer(object):
       self._report_proto = report_handler.create_report_proto(
           self._tt_config, self._parameters, tensor_trace_order,
           tensor_trace_points, self._signature_types())
+      if self._parameters.use_fingerprint_subdir:
+        self._parameters.trace_dir = os.path.join(
+            self._parameters.trace_dir, self._report_proto.fingerprint)
+        logging.info('TensorTracer updating trace_dir to %s',
+                     self._parameters.trace_dir)
+      self._report_proto_path = tensor_tracer_report.report_proto_path(
+          self._parameters.trace_dir)
       if self._parameters.report_file_path != _SKIP_REPORT_FILE:
         report_handler.write_report_proto(self._report_proto, self._parameters)
     else:
@@ -1624,11 +1644,12 @@ class TensorTracer(object):
       raise ValueError('Provide a trace_dir for tensor tracer in summary mode. '
                        '--trace_dir=/model/dir')
 
-    def _write_cache(step, **kwargs):
+    def _write_cache(step, event_file_suffix=None, **kwargs):
       """Writes the given caches as tensor summary.
 
       Args:
         step: Step tensor with dimension [num_cores].
+        event_file_suffix: Event filename suffix tensor.
         **kwargs: The dictionary of tensors that needs to be written as
           summaries. Key and value pairs within kwargs correspond to the tag
           name, and tensor content that will be written using summary.write.
@@ -1645,16 +1666,20 @@ class TensorTracer(object):
       Raises:
         RuntimeError: if there is no aggregate function defined for a signature.
       """
-
+      file_suffix = _TT_EVENT_FILE_SUFFIX
+      if event_file_suffix is not None:
+        file_suffix = string_ops.string_join([file_suffix, event_file_suffix],
+                                             separator='.')
       # TODO(deveci): Parametrize max_queue, so that flushing op can be called
       # less frequently.
       # Setting max_queue to 100 appears to be safe even when the number of
       # iterations are much lower, as the destructor of the writer flushes it.
       summary_write_ops = []
-      with summary.create_file_writer_v2(
+      summary_writer = summary.create_file_writer_v2(
           self._parameters.trace_dir,
-          filename_suffix=_TT_EVENT_FILE_SUFFIX,
-          max_queue=_TT_SUMMARY_MAX_QUEUE).as_default():
+          filename_suffix=file_suffix,
+          max_queue=_TT_SUMMARY_MAX_QUEUE)
+      with summary_writer.as_default():
         summary_metadata = summary_pb2.SummaryMetadata(
             plugin_data=summary_pb2.SummaryMetadata.PluginData(
                 plugin_name=_TT_TENSORBOARD_PLUGIN_NAME))
@@ -1669,8 +1694,7 @@ class TensorTracer(object):
             if key == _TT_SUMMARY_TAG and value.shape.as_list()[0] != 1:
               value = self.aggregate_global_cache(value)
 
-          with ops.control_dependencies(
-              summary.summary_writer_initializer_op()):
+          with ops.control_dependencies([summary_writer.init()]):
             summary_write_ops.append(summary.write(
                 _TT_SUMMARY_TAG + '/' + key, value, metadata=summary_metadata,
                 step=step[0]))
@@ -1825,7 +1849,7 @@ class TensorTracer(object):
           if len(processed_tensors) != 1:
             raise RuntimeError('Multiple stats are only allowed in compact '
                                'mode.')
-          processed_out_tensor = processed_tensors.values()[0]
+          processed_out_tensor = list(processed_tensors.values())[0]
           # Store the whole tensor in a buffer.
           trace_op = self._snapshot_tensor(processed_out_tensor)
         else:

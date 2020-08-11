@@ -40,13 +40,12 @@ limitations under the License.
 #include "tensorflow/core/platform/fingerprint.h"
 #include "tensorflow/core/platform/setround.h"
 #include "tensorflow/core/profiler/lib/annotated_traceme.h"
+#include "tensorflow/core/profiler/lib/connected_traceme.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
+#include "tensorflow/core/profiler/lib/traceme_encode.h"
 #include "tensorflow/core/public/version.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
 #if !defined(IS_MOBILE_PLATFORM)
-#if !defined(PLATFORM_WINDOWS)
-#include "tensorflow/compiler/jit/xla_kernel_creator_util.h"
-#endif  // !PLATFORM_WINDOWS
 #include "tensorflow/core/grappler/optimizers/meta_optimizer.h"
 #endif  // !IS_MOBILE_PLATFORM
 
@@ -99,7 +98,7 @@ KernelAndDeviceFunc::~KernelAndDeviceFunc() {
   }
 }
 
-Status KernelAndDeviceOp::Init(const NodeDef& ndef,
+Status KernelAndDeviceOp::Init(const Context& ctx, const NodeDef& ndef,
                                GraphCollector* graph_collector) {
   OpKernel* k = nullptr;
   if (flr_ == nullptr) {
@@ -131,7 +130,8 @@ Status KernelAndDeviceOp::Init(const NodeDef& ndef,
   return Status::OK();
 }
 
-Status KernelAndDeviceFunc::InstantiateFunc(const NodeDef& ndef,
+Status KernelAndDeviceFunc::InstantiateFunc(const Context& ctx,
+                                            const NodeDef& ndef,
                                             GraphCollector* graph_collector) {
   const OpDef* op_def = nullptr;
   const FunctionDef* function_def;
@@ -166,6 +166,10 @@ Status KernelAndDeviceFunc::InstantiateFunc(const NodeDef& ndef,
   const auto& it = ndef.attr().find("executor_type");
   if (it != ndef.attr().end()) {
     options.executor_type = it->second.s();
+  }
+  const auto& is_component_fn_it = ndef.attr().find("is_component_function");
+  if (is_component_fn_it != ndef.attr().end()) {
+    options.is_component_function = is_component_fn_it->second.b();
   }
 #if !defined(IS_MOBILE_PLATFORM)
   // Android tf library does not include grappler.
@@ -209,14 +213,16 @@ Status KernelAndDeviceFunc::InstantiateFunc(const NodeDef& ndef,
       ->mutable_optimizer_options()
       ->set_do_function_inlining(true);
 
+  options.config_proto.set_log_device_placement(ctx.log_device_placement);
+
   TF_RETURN_IF_ERROR(
       pflr_->Instantiate(ndef.op(), AttrSlice(ndef), options, &handle_));
   return pflr_->IsCrossProcess(handle_, &is_cross_process_);
 }
 
-Status KernelAndDeviceFunc::Init(const NodeDef& ndef,
+Status KernelAndDeviceFunc::Init(const Context& ctx, const NodeDef& ndef,
                                  GraphCollector* graph_collector) {
-  TF_RETURN_IF_ERROR(InstantiateFunc(ndef, graph_collector));
+  TF_RETURN_IF_ERROR(InstantiateFunc(ctx, ndef, graph_collector));
   return pflr_->GetOutputDevices(handle_, &output_devices_);
 }
 
@@ -233,10 +239,10 @@ struct OpExecutionState : public core::RefCounted {
 
 Status KernelAndDeviceOp::Run(
     ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
-    std::vector<Tensor>* outputs, CancellationManager* cancellation_manager,
+    std::vector<EagerKernelRet>* outputs,
+    CancellationManager* cancellation_manager,
     const absl::optional<EagerRemoteFunctionParams>& remote_func_params) {
   OpKernelContext::Params params;
-  params.is_eager = true;
   params.device = device_;
   params.frame_iter = FrameAndIter(0, 0);
   params.inputs = inputs.GetTensorValues();
@@ -288,7 +294,7 @@ Status KernelAndDeviceOp::Run(
     // 'AnnotatedTraceMe' will trace both scheduling time on host and execution
     // time on device of the OpKernel.
     profiler::AnnotatedTraceMe activity(
-        [&] { return kernel_->TraceString(&context, /*verbose=*/false); },
+        [&] { return kernel_->TraceString(context, /*verbose=*/false); },
         profiler::TraceMeLevel::kInfo);
     device_->Compute(kernel_.get(), &context);
   }
@@ -311,7 +317,8 @@ Status KernelAndDeviceOp::Run(
 
 Status KernelAndDeviceFunc::Run(
     ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
-    std::vector<Tensor>* outputs, CancellationManager* cancellation_manager,
+    std::vector<EagerKernelRet>* outputs,
+    CancellationManager* cancellation_manager,
     const absl::optional<EagerRemoteFunctionParams>& remote_func_params) {
   Notification n;
   Status status;
@@ -326,7 +333,8 @@ Status KernelAndDeviceFunc::Run(
 
 void KernelAndDeviceFunc::RunAsync(
     ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
-    std::vector<Tensor>* outputs, CancellationManager* cancellation_manager,
+    std::vector<EagerKernelRet>* outputs,
+    CancellationManager* cancellation_manager,
     const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
     std::function<void(const Status&)> done) {
   std::shared_ptr<FunctionLibraryRuntime::Options> opts = nullptr;
@@ -379,16 +387,17 @@ void KernelAndDeviceFunc::RunAsync(
 
   outputs->clear();
 
-  profiler::TraceMe* activity = new profiler::TraceMe(
+  profiler::TraceMeProducer activity(
+      // To TraceMeConsumers in ExecutorState::Process/Finish.
       [&] {
-        return absl::StrCat("FunctionRun#name=", name(), ",id=", opts->step_id,
-                            "#");
+        return profiler::TraceMeEncode(
+            "FunctionRun", {{"id", opts->step_id}, {"_r", 1} /*root_event*/});
       },
+      profiler::ContextType::kTfExecutor, opts->step_id,
       profiler::TraceMeLevel::kInfo);
   pflr_->Run(*opts, handle_, inputs, outputs,
-             [opts, rendezvous, local_cm, step_container, this, activity,
+             [opts, rendezvous, local_cm, step_container, this,
               done = std::move(done)](const Status& s) {
-               delete activity;
                rendezvous->Unref();
                if (step_container == nullptr) {
                  this->step_container_.CleanUp();
