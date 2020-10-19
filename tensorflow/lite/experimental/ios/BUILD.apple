@@ -21,6 +21,10 @@ sh_binary(
     srcs = [
         "hide_symbols_with_allowlist.sh",
     ],
+    visibility = [
+        "//tensorflow/lite:__subpackages__",
+        "//tensorflow_lite_support:__subpackages__",
+    ],
 )
 
 strip_common_include_path_prefix(
@@ -79,7 +83,7 @@ ios_static_framework(
 # TensorFlow Lite runtime, it is intended to be linked along with the
 # TensorFlowLiteC framework above in a composable way.
 #
-# bazel build -c opt --config=ios_fat //tensorflow/lite/experimental/ios:TensorFlowLiteCCoreMl_framework
+# bazel build -c opt --config=ios_fat //tensorflow/lite/experimental/ios:TensorFlowLiteCCoreML_framework
 tflite_ios_static_framework(
     name = "TensorFlowLiteCCoreML_framework",
     hdrs = [

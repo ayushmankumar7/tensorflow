@@ -449,7 +449,7 @@ Status IrEmitter::HandleInfeed(HloInstruction* instruction) {
 Status IrEmitter::EmitXfeedTransfer(XfeedKind kind, const Shape& shape,
                                     llvm::Value* program_buffer_address) {
   int64 length = ByteSizeOf(shape);
-  if (length <= 0 || length > std::numeric_limits<int32>::max()) {
+  if (length < 0 || length > std::numeric_limits<int32>::max()) {
     return InvalidArgument(
         "xfeed (infeed or outfeed) buffer length %d is outside the valid "
         "size range",
@@ -1640,7 +1640,7 @@ IrEmitter::ShardedVectorType IrEmitter::CreateShardedVectorType(
 
     if (current_size_fragment >= vector_register_size_in_elements) {
       auto vector_type = llvm::VectorType::get(
-          element_ir_type, vector_register_size_in_elements);
+          element_ir_type, vector_register_size_in_elements, false);
       sharded_vector_type.insert(
           sharded_vector_type.end(),
           current_size_fragment / vector_register_size_in_elements,
@@ -1656,7 +1656,7 @@ IrEmitter::ShardedVectorType IrEmitter::CreateShardedVectorType(
     // of two are all legal vector sizes (or at least can be lowered easily by
     // LLVM).
     sharded_vector_type.push_back(
-        llvm::VectorType::get(element_ir_type, current_size_fragment));
+        llvm::VectorType::get(element_ir_type, current_size_fragment, false));
   }
   return sharded_vector_type;
 }

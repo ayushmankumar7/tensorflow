@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/gtl/flatmap.h"
 #include "tensorflow/core/lib/gtl/flatset.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -98,6 +99,10 @@ class VSpace {
       gtl::ArraySlice<Gradient*> output_gradients,
       std::vector<Gradient*>* result) const = 0;
 
+  // Builds a tensor filled with ones with the same shape and dtype as `t`.
+  virtual Status BuildOnesLike(const TapeTensor& t,
+                               Gradient** result) const = 0;
+
   // Looks up the ID of a Gradient.
   virtual int64 TensorId(Gradient* tensor) const = 0;
 
@@ -121,7 +126,7 @@ class GradientTape {
   // functions (and hence the tensors they keep alive). Instead, everything
   // is deleted in ~GradientTape. Persistent GradientTapes are useful when
   // users want to compute multiple gradients over the same tape.
-  GradientTape(bool persistent) : persistent_(persistent) {}
+  explicit GradientTape(bool persistent) : persistent_(persistent) {}
   ~GradientTape() {
     for (const auto& pair : op_tape_) {
       pair.second.backward_function_deleter(pair.second.backward_function);
@@ -146,13 +151,16 @@ class GradientTape {
   // once) and produces the gradient of the target tensors with respect to the
   // source tensors. The output gradients are used if not empty and not
   // null. The result is populated with one tensor per target element.
+  // When running backward functions, builds zeros-like tensors for
+  // incoming grads which are nullptrs, unless `build_default_zeros_grads`
+  // is set to false.
   Status ComputeGradient(
       const VSpace<Gradient, BackwardFunction, TapeTensor>& vspace,
       const gtl::ArraySlice<int64> target_tensor_ids,
       const gtl::ArraySlice<int64> source_tensor_ids,
       const std::unordered_map<int64, TapeTensor>& sources_that_are_targets,
       gtl::ArraySlice<Gradient*> output_gradients,
-      std::vector<Gradient*>* result);
+      std::vector<Gradient*>* result, bool build_default_zeros_grads = true);
 
   bool IsPersistent() const { return persistent_; }
 
@@ -592,8 +600,10 @@ Status InitialGradients(
         for (int j = 0; j < op_it->second.output_tensor_info.size(); ++j) {
           if (op_it->second.output_tensor_info[j].GetID() == id) {
             found = true;
-            (*result)[id].push_back(
-                op_it->second.output_tensor_info[j].OnesLike());
+            Gradient* ones_like = nullptr;
+            TF_RETURN_IF_ERROR(vspace.BuildOnesLike(
+                op_it->second.output_tensor_info[j], &ones_like));
+            (*result)[id].push_back(ones_like);
             break;
           }
         }
@@ -608,7 +618,10 @@ Status InitialGradients(
         // target is also a source.
         auto source_tensor = sources_that_are_targets.find(id);
         if (source_tensor != sources_that_are_targets.end()) {
-          (*result)[id].push_back(source_tensor->second.OnesLike());
+          Gradient* ones_like = nullptr;
+          TF_RETURN_IF_ERROR(
+              vspace.BuildOnesLike(source_tensor->second, &ones_like));
+          (*result)[id].push_back(ones_like);
         }
       }
     } else {
@@ -655,8 +668,8 @@ Status GradientTape<Gradient, BackwardFunction, TapeTensor>::ComputeGradient(
     const gtl::ArraySlice<int64> target_tensor_ids,
     const gtl::ArraySlice<int64> source_tensor_ids,
     const std::unordered_map<int64, TapeTensor>& sources_that_are_targets,
-    gtl::ArraySlice<Gradient*> output_gradients,
-    std::vector<Gradient*>* result) {
+    gtl::ArraySlice<Gradient*> output_gradients, std::vector<Gradient*>* result,
+    bool build_default_zeros_grads) {
   std::unordered_set<int64> sources_set(source_tensor_ids.begin(),
                                         source_tensor_ids.end());
   BackpropInitialState<BackwardFunction, TapeTensor> state = PrepareBackprop(
@@ -717,14 +730,14 @@ Status GradientTape<Gradient, BackwardFunction, TapeTensor>::ComputeGradient(
       const int64 id = trace.output_tensor_info[i].GetID();
       auto grad_it = gradients.find(id);
       if (grad_it == gradients.end()) {
-        auto func_name_it =
-            FunctionsAcceptingNoneForIndicesMap()->find(trace.op_type);
-        if (func_name_it != FunctionsAcceptingNoneForIndicesMap()->end() &&
-            func_name_it->second.find(i) != func_name_it->second.end()) {
-          out_gradients.push_back(nullptr);
-        } else {
-          out_gradients.push_back(nullptr);
-          zero_indices.push_back(i);
+        out_gradients.push_back(nullptr);
+        if (build_default_zeros_grads) {
+          auto func_name_it =
+              FunctionsAcceptingNoneForIndicesMap()->find(trace.op_type);
+          if (func_name_it == FunctionsAcceptingNoneForIndicesMap()->end() ||
+              func_name_it->second.find(i) == func_name_it->second.end()) {
+            zero_indices.push_back(i);
+          }
         }
       } else {
         any_gradient_nonzero = true;
@@ -745,6 +758,7 @@ Status GradientTape<Gradient, BackwardFunction, TapeTensor>::ComputeGradient(
       }
     }
     std::vector<Gradient*> in_gradients;
+    DCHECK(build_default_zeros_grads || zero_indices.empty());
     if (any_gradient_nonzero) {
       for (const auto i : zero_indices) {
         out_gradients[i] = trace.output_tensor_info[i].ZerosLike();
@@ -930,7 +944,7 @@ ForwardAccumulator<Gradient, BackwardFunction, TapeTensor>::ForwardpropFromTape(
       // TODO(allenl): Figure out why using zeros_like everywhere causes issues
       // for some gradient functions and if there's another way to work around
       // it (e.g. conds instead of ifs). The value shouldn't really matter.
-      aid = output_tensor.OnesLike();
+      TF_RETURN_IF_ERROR(vspace_.BuildOnesLike(output_tensor, &aid));
     }
     if (TF_PREDICT_FALSE(aid == nullptr)) {
       return tensorflow::errors::Internal(

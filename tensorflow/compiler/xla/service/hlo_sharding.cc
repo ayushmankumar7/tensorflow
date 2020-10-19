@@ -56,6 +56,13 @@ HloSharding HloSharding::PartialTile(
 
 HloSharding HloSharding::PartialTile(
     const Array<int64>& tile_assignment_last_dim_replicate) {
+  if (tile_assignment_last_dim_replicate.dimensions().back() == 1) {
+    auto new_tile_dims = tile_assignment_last_dim_replicate.dimensions();
+    new_tile_dims.pop_back();
+    auto fully_tiled = tile_assignment_last_dim_replicate;
+    fully_tiled.Reshape(new_tile_dims);
+    return HloSharding(fully_tiled);
+  }
   std::vector<std::set<int64>> sorted_groups(
       tile_assignment_last_dim_replicate.num_elements() /
       tile_assignment_last_dim_replicate.dimensions().back());
@@ -242,7 +249,8 @@ std::vector<int64> HloSharding::TileLimitForDevice(const Shape& shape,
                               shape.dimensions().end());
   }
 
-  CHECK_EQ(shape.dimensions_size(), tile_assignment_.num_dimensions());
+  CHECK_EQ(shape.dimensions_size() + (ReplicateOnLastTileDim() ? 1 : 0),
+           tile_assignment_.num_dimensions());
   std::vector<int64> index = TileIndexForDevice(device);
   for (int64 i = 0; i < index.size(); ++i) {
     const int64 shape_dim = shape.dimensions(i);

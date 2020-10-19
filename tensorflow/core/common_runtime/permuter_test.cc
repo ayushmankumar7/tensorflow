@@ -49,9 +49,8 @@ static int64 kStepId = 123;
 class FailTestRMA : public CollectiveRemoteAccessLocal {
  public:
   FailTestRMA(const DeviceMgr* dev_mgr, DeviceResolverInterface* dev_resolver,
-              std::shared_ptr<UnboundedWorkQueue> work_queue, int64 step_id,
-              int fail_after)
-      : CollectiveRemoteAccessLocal(dev_mgr, dev_resolver, work_queue, step_id),
+              int64 step_id, int fail_after)
+      : CollectiveRemoteAccessLocal(dev_mgr, dev_resolver, step_id),
         fail_after_(fail_after) {}
 
   bool MaybeFail(const StatusCallback& done) {
@@ -162,10 +161,11 @@ class PermuterTest : public ::testing::Test {
     }
     dev_resolver_ = absl::make_unique<DeviceResolverLocal>(dev_mgr_.get());
     work_queue_ = std::make_shared<UnboundedWorkQueue>(Env::Default(), "test");
-    rma_ = new FailTestRMA(dev_mgr_.get(), dev_resolver_.get(), work_queue_,
-                           kStepId, fail_after);
-    col_exec_ = new BaseCollectiveExecutor(
-        &col_exec_mgr_, rma_, kStepId, dev_mgr_.get(), gpu_ring_order_.get());
+    rma_ = new FailTestRMA(dev_mgr_.get(), dev_resolver_.get(), kStepId,
+                           fail_after);
+    col_exec_ = new BaseCollectiveExecutor(&col_exec_mgr_, rma_, kStepId,
+                                           dev_mgr_.get(),
+                                           gpu_ring_order_.get(), work_queue_);
     col_params_.name = "test_collective";
     col_params_.instance.data_type = dtype;
     static const int kInstanceKey = 18;
@@ -183,11 +183,11 @@ class PermuterTest : public ::testing::Test {
         } else {
           dev_name = strings::StrCat(task_name, "/device:CPU:", di);
         }
-        col_params_.instance.device_names.push_back(dev_name);
+        col_params_.group.device_names.push_back(dev_name);
         col_params_.instance.devices.push_back(dev_name);
         int default_rank = wi * num_devices_per_worker + di;
         permutation_.push_back(default_rank);
-        col_params_.instance.task_names.push_back(task_name);
+        col_params_.group.task_names.push_back(task_name);
         col_params_.task.is_local.push_back(true);
       }
     }
@@ -212,7 +212,7 @@ class PermuterTest : public ::testing::Test {
       for (int di = 0; di < num_devices_per_worker; di++) {
         int default_rank = wi * num_devices_per_worker + di;
         instances_.push_back(new DeviceInstance(
-            default_rank, col_params_.instance.device_names[default_rank],
+            default_rank, col_params_.group.device_names[default_rank],
             device_type, this));
       }
     }
@@ -294,6 +294,7 @@ class PermuterTest : public ::testing::Test {
                              actual.template flat<T>()(i))
                 << "Mismatch at device " << di << " index " << i;
             break;
+          case DT_BOOL:
           case DT_INT32:
           case DT_INT64:
             EXPECT_EQ(expected[(di * tensor_len) + i],
@@ -322,16 +323,14 @@ class PermuterTest : public ::testing::Test {
       col_params_.instance.instance_key =
           parent_->col_params_.instance.instance_key;
       col_params_.group.device_type = parent_->col_params_.group.device_type;
-      col_params_.instance.device_names =
-          parent_->col_params_.instance.device_names;
+      col_params_.group.device_names = parent_->col_params_.group.device_names;
       col_params_.instance.devices = parent_->col_params_.instance.devices;
       col_params_.instance.permutation =
           parent->col_params_.instance.permutation;
-      col_params_.instance.task_names =
-          parent_->col_params_.instance.task_names;
+      col_params_.group.task_names = parent_->col_params_.group.task_names;
       col_params_.task.is_local = parent_->col_params_.task.is_local;
       CHECK_EQ(col_params_.instance.devices.size(),
-               col_params_.instance.device_names.size());
+               col_params_.group.device_names.size());
       // Default rank is order in device_names.
       col_params_.default_rank = rank;
     }
@@ -387,8 +386,9 @@ class PermuterTest : public ::testing::Test {
       Permuter* permuter = new Permuter;
       core::ScopedUnref unref(permuter);
       auto col_ctx = std::make_shared<CollectiveContext>(
-          parent_->col_exec_, parent_->dev_mgr_.get(), &ctx, &op_params,
-          col_params_, exec_key, kStepId, &tensor_input_, &tensor_output_);
+          parent_->col_exec_, /*nccl_communicator*/ nullptr,
+          parent_->dev_mgr_.get(), &ctx, &op_params, col_params_, exec_key,
+          kStepId, &tensor_input_, &tensor_output_);
       TF_CHECK_OK(permuter->InitializeCollectiveContext(col_ctx));
       Notification note;
       // Run the permute.
@@ -443,6 +443,9 @@ class PermuterTest : public ::testing::Test {
          DaTy##B##_DevTy##T##_Wkr##W##_Dev##D##_Sdiv##S##_Len##L##_Abrt##A) { \
     DataType dtype = DT_##B;                                                  \
     switch (dtype) {                                                          \
+      case DT_BOOL: {                                                         \
+        RunTest<bool>(dtype, DEVICE_##T, W, D, L, A);                         \
+      } break;                                                                \
       case DT_FLOAT: {                                                        \
         RunTest<float>(dtype, DEVICE_##T, W, D, L, A);                        \
       } break;                                                                \
@@ -471,6 +474,10 @@ DEF_TEST(FLOAT, CPU, 2, 1, 128, 0)
 DEF_TEST(FLOAT, CPU, 2, 4, 128, 0)
 DEF_TEST(FLOAT, CPU, 2, 8, 4095, 0)
 DEF_TEST(FLOAT, CPU, 4, 4, 1045991, 0)
+
+DEF_TEST(BOOL, CPU, 1, 4, 1, 0)
+DEF_TEST(BOOL, CPU, 2, 4, 1, 0)
+DEF_TEST(BOOL, CPU, 2, 4, 1001, 0)
 
 DEF_TEST(DOUBLE, CPU, 2, 4, 128, 0)
 DEF_TEST(INT32, CPU, 2, 4, 128, 0)

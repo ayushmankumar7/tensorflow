@@ -42,7 +42,12 @@ limitations under the License.
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"  // from @llvm-project
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
+#include "mlir/Dialect/Linalg/IR/LinalgTypes.h"  // from @llvm-project
+#include "mlir/Dialect/SCF/SCF.h"  // from @llvm-project
+#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/Dialect/Vector/VectorOps.h"  // from @llvm-project
 #include "mlir/InitAllDialects.h"  // from @llvm-project
 #include "tensorflow/compiler/xla/cpu_function_runtime.h"
 #include "tensorflow/compiler/xla/literal.h"
@@ -85,7 +90,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_cse.h"
 #include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/compiler/xla/service/hlo_element_type_converter.h"
-#include "tensorflow/compiler/xla/service/hlo_get_dimension_size_rewriter.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_memory_scheduler.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
@@ -99,6 +103,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
 #include "tensorflow/compiler/xla/service/map_inliner.h"
+#include "tensorflow/compiler/xla/service/qr_expander.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
@@ -121,6 +126,21 @@ limitations under the License.
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/platform/dynamic_annotations.h"
+
+namespace {
+
+// We need to explicitly load all the dialects we will involved in emitting the
+// IR. This is only needed because of how MLIR is bolted into XLA and does not
+// make use of the MLIR infrastructure (like using a proper pass pipeline).
+// Hopefully this will all go away at some point in favor of a better
+// integration.
+void LoadMLIRDialects(mlir::MLIRContext& context) {
+  context.loadDialect<mlir::linalg::LinalgDialect, mlir::scf::SCFDialect,
+                      mlir::vector::VectorDialect, mlir::StandardOpsDialect,
+                      mlir::AffineDialect>();
+}
+
+}  // namespace
 
 namespace xla {
 namespace cpu {
@@ -165,8 +185,6 @@ CpuCompiler::CpuCompiler() {
   // Initialize LLVM's MC layer for the native target.
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
-
-  mlir::registerAllDialects();
 }
 
 namespace {
@@ -264,6 +282,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   pipeline.AddPass<ComparisonExpander>();
   pipeline.AddPass<CholeskyExpander>();
+  pipeline.AddPass<QrExpander>();
   pipeline.AddPass<TriangularSolveExpander>();
 
   // Inline computations with a single call site.
@@ -291,8 +310,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       /*expansion_type=*/LogisticExpansionType::kExp);
   pipeline.AddPass<ConditionalCanonicalizer>();
   pipeline.AddPass<DynamicPadder>();
-  pipeline.AddPass<ScatterExpander>();
-  pipeline.AddPass<HloGetDimensionSizeRewriter>();
+  pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
   pipeline.AddPass<ConvCanonicalization>(target_machine_features);
   {
     auto& pass =
@@ -544,9 +562,11 @@ StatusOr<
     std::tuple<std::unique_ptr<HloModule>, std::unique_ptr<BufferAssignment>>>
 CpuCompiler::RunHloPassesAndBufferAssignement(
     std::unique_ptr<HloModule> module, se::StreamExecutor* executor,
-    se::DeviceMemoryAllocator* device_allocator) {
-  TF_ASSIGN_OR_RETURN(
-      module, RunHloPasses(std::move(module), executor, device_allocator));
+    se::DeviceMemoryAllocator* device_allocator, bool optimize) {
+  if (optimize) {
+    TF_ASSIGN_OR_RETURN(
+        module, RunHloPasses(std::move(module), executor, device_allocator));
+  }
 
   // Select an order for emitting the HLO instructions for each computation.
   // Using this sequence enables tighter buffer liveness analysis and reduced
@@ -624,6 +644,7 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
 
   // Compile must be thread-safe so create a new LLVM context for the module.
   mlir::MLIRContext mlir_context;
+  LoadMLIRDialects(mlir_context);
   llvm::LLVMContext llvm_context;
   auto llvm_module =
       absl::make_unique<llvm::Module>("__compute_module", llvm_context);
@@ -835,6 +856,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
 
   // Compile must be thread-safe so create a new LLVM context for the module.
   mlir::MLIRContext mlir_context;
+  LoadMLIRDialects(mlir_context);
   llvm::LLVMContext llvm_context;
   llvm::Module llvm_module("__compute_module", llvm_context);
   llvm_module.setDataLayout(target_machine->createDataLayout());

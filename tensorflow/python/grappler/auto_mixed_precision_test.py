@@ -512,9 +512,7 @@ class AutoMixedPrecisionTest(test.TestCase, parameterized.TestCase):
     tol = 5e-2 if mode == 'mkl' else 1e-3
     self.assertAllClose(output_val_ref, output_val, atol=tol, rtol=tol)
 
-  # TODO(reedwm): Fix and enable this test with MKL. Currently this crashes with
-  # MKL
-  @parameterized.parameters(['cuda'])
+  @parameterized.parameters(['cuda', 'mkl'])
   @test_util.run_deprecated_v1
   @test_util.disable_xla('This test does not pass with XLA')
   def test_conv_bn_dropout(self, mode):
@@ -545,6 +543,7 @@ class AutoMixedPrecisionTest(test.TestCase, parameterized.TestCase):
     # The default tolerance (1e-3) results in a tiny fraction (<1%) of
     # miscompares on ROCm platform, and hence the tolerance bump
     tol = 2e-3 if test.is_built_with_rocm else 1e-3
+    tol = 5e-2 if mode == 'mkl' else tol
     self.assertAllClose(output_val_ref, output_val, atol=tol, rtol=tol)
 
   # TODO(reedwm): Fix and enable this test with MKL. Currently this crashes with
@@ -579,9 +578,8 @@ class AutoMixedPrecisionTest(test.TestCase, parameterized.TestCase):
   def test_depthwise_conv2d(self, mode):
     """Test grad ops with depthwise convolution2d graph."""
     self._maybe_skip(mode)
-    cudnn_version = tuple([
-        int(x) for x in sysconfig.get_build_info()['cudnn_version'].split('.')
-    ])
+    cudnn_version_str = sysconfig.get_build_info().get('cudnn_version', '0.0')
+    cudnn_version = tuple([int(x) for x in cudnn_version_str.split('.')])
     if cudnn_version < (8,):
       # Depthwise conv2d ops are only enabled in auto_mixed_precision as of
       # cuDNN v8.

@@ -48,13 +48,11 @@ Type TFFrameworkDialect::parseType(DialectAsmParser &parser) const {
 
 /// Print a type registered to this dialect.
 void TFFrameworkDialect::printType(Type type, DialectAsmPrinter &os) const {
-  switch (type.getKind()) {
-    case TFFrameworkTypes::OpKernelContextType:
-      os << "op_kernel_context";
-      return;
-    default:
-      llvm_unreachable("unexpected TF Framework type kind");
+  if (type.isa<OpKernelContextType>()) {
+    os << "op_kernel_context";
+    return;
   }
+  llvm_unreachable("unexpected TF Framework type kind");
 }
 
 template <typename OpTy>
@@ -79,9 +77,9 @@ LogicalResult Verify<AllocRawOp>(AllocRawOp op) {
   return success();
 }
 
-#define GET_OP_CLASSES
-#include "tensorflow/compiler/mlir/tools/kernel_gen/ir/tf_framework_ops.cc.inc"
-
 }  // namespace tf_framework
 }  // namespace kernel_gen
 }  // namespace mlir
+
+#define GET_OP_CLASSES
+#include "tensorflow/compiler/mlir/tools/kernel_gen/ir/tf_framework_ops.cc.inc"

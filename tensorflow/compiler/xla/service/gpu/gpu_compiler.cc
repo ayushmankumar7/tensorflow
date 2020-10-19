@@ -59,7 +59,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/gpu_layout_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_sanitize_constant_names.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_scatter_expander.h"
-#include "tensorflow/compiler/xla/service/gpu/horizontal_fusion.h"
+#include "tensorflow/compiler/xla/service/gpu/horizontal_input_fusion.h"
+#include "tensorflow/compiler/xla/service/gpu/horizontal_loop_fusion.h"
 #include "tensorflow/compiler/xla/service/gpu/instruction_fusion.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emitter_context.h"
@@ -83,7 +84,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/compiler/xla/service/hlo_element_type_converter.h"
-#include "tensorflow/compiler/xla/service/hlo_get_dimension_size_rewriter.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_fix.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_pipeline.h"
@@ -92,6 +92,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
+#include "tensorflow/compiler/xla/service/qr_expander.h"
+#include "tensorflow/compiler/xla/service/reshape_mover.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/slice_sinker.h"
@@ -151,6 +153,8 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<ZeroSizedHloElimination>();
 
     pipeline.AddPass<GpuScatterExpander>();
+    // TODO(phawkins): replace QR decompositions with calls to cuSOLVER.
+    pipeline.AddPass<QrExpander>();
 
     pipeline.AddPass<DynamicIndexSplitter>();
 
@@ -197,13 +201,12 @@ Status GpuCompiler::OptimizeHloModule(
           /*layout_sensitive=*/false,
           /*allow_mixed_precision=*/false);
 
-      pass.AddPass<HloGetDimensionSizeRewriter>();
-
       // BatchNormExpander can create zero-sized ops, so zero-sized HLO
       // elimination has to come after that pass.
       pass.AddPass<ZeroSizedHloElimination>();
 
       pass.AddPass<GatherExpander>(GatherExpander::kEliminateSimpleGathers);
+      pass.AddPass<ScatterExpander>(ScatterExpander::kEliminateSimpleScatters);
 
       AlgebraicSimplifierOptions options;
       // When transposes appear in a fusion node, we can easily adjust the
@@ -228,6 +231,7 @@ Status GpuCompiler::OptimizeHloModule(
       // pass.AddPass<SliceSinker>();
 
       pass.AddPass<HloDCE>();
+      pass.AddPass<ReshapeMover>();
       pass.AddPass<HloConstantFolding>();
       pass.AddPass<ConditionalSimplifier>();
     }
@@ -238,8 +242,7 @@ Status GpuCompiler::OptimizeHloModule(
           return IsMatrixMultiplication(dot)
                      ? candidate_operands
                      : TransposeFolding::OperandIndices{};
-        },
-        TransposeFolding::NeverFoldTranspose);
+        });
     pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
     pipeline.AddPass<HloDCE>();
 
@@ -303,12 +306,14 @@ Status GpuCompiler::OptimizeHloModule(
     TF_RETURN_IF_ERROR(fusion.Run(hlo_module).status());
 
     HloPassPipeline horizontal_fusion("horizontal_fusion");
-    horizontal_fusion.AddPass<GpuHorizontalFusion>();
+    horizontal_fusion.AddPass<GpuHorizontalLoopFusion>();
+    horizontal_fusion.AddPass<GpuHorizontalInputFusion>();
     horizontal_fusion.AddPass<HloCSE>(/*is_layout_sensitive=*/true,
                                       /*only_fusion_computations=*/true);
     horizontal_fusion.AddPass<HloDCE>();
     TF_RETURN_IF_ERROR(horizontal_fusion.Run(hlo_module).status());
   }
+
   {
     HloPassPipeline pipeline("all_reduce_combiner");
     pipeline.AddPass<AllReduceCombiner>(
@@ -485,7 +490,8 @@ static Status CompileModuleToLlvmIrImpl(
     int pointer_size, const HloProfileIndexMap* profile_index_map,
     std::unique_ptr<llvm::Module>* llvm_module,
     std::unique_ptr<BufferAssignment>* buffer_assignment,
-    std::unique_ptr<ThunkSchedule>* thunk_schedule) {
+    std::unique_ptr<ThunkSchedule>* thunk_schedule,
+    std::vector<GpuExecutable::ConstantInfo>* constants) {
   *llvm_module = absl::make_unique<llvm::Module>("", *llvm_context);
 
   (*llvm_module)->setTargetTriple(target_triple);
@@ -518,7 +524,6 @@ static Status CompileModuleToLlvmIrImpl(
   DumpHloModuleIfEnabled(*hlo_module, **buffer_assignment,
                          "after_optimizations");
 
-  mlir::registerAllDialects();
   mlir::MLIRContext mlir_context;
 
   IrEmitterContext ir_emitter_context(
@@ -532,8 +537,6 @@ static Status CompileModuleToLlvmIrImpl(
       auto ir_emitter,
       IrEmitterUnnested::Create(hlo_module->config(), entry_computation,
                                 &ir_emitter_context));
-
-  TF_RETURN_IF_ERROR(ir_emitter->EmitConstantGlobals());
 
   {
     XLA_SCOPED_LOGGING_TIMER("GpuCompiler::RunBackend - IR emission");
@@ -583,6 +586,10 @@ static Status CompileModuleToLlvmIrImpl(
     *thunk_schedule = absl::make_unique<ThunkSchedule>(
         std::make_unique<ThunkSequence>(std::move(thunk_sequence)),
         std::move(stream_assignment), std::move(thunk_to_hlo));
+
+    if (constants) {
+      *constants = std::move(ir_emitter_context.constants());
+    }
   }
 
   return Status::OK();
@@ -614,6 +621,9 @@ StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
       stream_exec->GetDeviceDescription().threads_per_warp();
   gpu_device_info.shared_memory_per_block =
       stream_exec->GetDeviceDescription().shared_memory_per_block();
+  gpu_device_info.threads_per_core_limit =
+      stream_exec->GetDeviceDescription().threads_per_core_limit();
+  gpu_device_info.core_count = stream_exec->GetDeviceDescription().core_count();
 
   absl::optional<CudaComputeCapability> cuda_compute_capability =
       [&]() -> absl::optional<CudaComputeCapability> {
@@ -648,12 +658,13 @@ StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
   std::unique_ptr<llvm::Module> llvm_module;
   std::unique_ptr<BufferAssignment> buffer_assignment;
   std::unique_ptr<ThunkSchedule> thunk_schedule;
+  std::vector<GpuExecutable::ConstantInfo> constants;
 
   TF_RETURN_IF_ERROR(CompileModuleToLlvmIrImpl(
       module.get(), &llvm_context, target_triple_, data_layout_,
       stream_exec->platform()->Name(), gpu_device_info, cuda_compute_capability,
       GetCanShareBuffer(), pointer_size_, profile_index_map.get(), &llvm_module,
-      &buffer_assignment, &thunk_schedule));
+      &buffer_assignment, &thunk_schedule, &constants));
 
   if (user_pre_optimization_hook_) {
     user_pre_optimization_hook_(*llvm_module);
@@ -699,7 +710,7 @@ StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
       backend_result.first, backend_result.second, gpu_version,
       std::move(thunk_schedule), std::move(module),
       std::move(buffer_assignment), std::move(profile_printer),
-      std::move(profile_index_map));
+      std::move(profile_index_map), std::move(constants));
   if (embed_ir_in_executable) {
     DCHECK_NE("", ir_module_string_before_opt);
     gpu_executable->set_ir_module_string(ir_module_string_before_opt);
@@ -733,7 +744,7 @@ StatusOr<std::unique_ptr<llvm::Module>> CompileModuleToLlvmIr(
       hlo_module, llvm_context, target_triple, data_layout, platform_name,
       gpu_device_info, cuda_compute_capability, DummyCanShareBufferFunction,
       pointer_size, /*profile_index_map=*/nullptr, &llvm_module,
-      &buffer_assignment, &thunk_schedule));
+      &buffer_assignment, &thunk_schedule, nullptr));
   return llvm_module;
 }
 }  // namespace gpu

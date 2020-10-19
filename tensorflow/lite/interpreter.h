@@ -21,6 +21,7 @@ limitations under the License.
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -35,10 +36,6 @@ limitations under the License.
 #include "tensorflow/lite/stderr_reporter.h"
 #include "tensorflow/lite/type_to_tflitetype.h"
 
-#if TFLITE_EXPERIMENTAL_RUNTIME_EAGER
-#include "tensorflow/lite/experimental/tf_runtime/public/eager_interpreter.h"
-#endif
-
 namespace tflite {
 
 class InterpreterTest;
@@ -47,8 +44,6 @@ namespace delegates {
 class InterpreterUtils;  // Class for friend declarations.
 }  // namespace delegates
 
-namespace impl {
-
 /// An interpreter for a graph of nodes that input and output from tensors.
 /// Each node of the graph processes a set of input tensors and produces a
 /// set of output Tensors. All inputs/output tensors are referenced by index.
@@ -56,35 +51,39 @@ namespace impl {
 /// Usage:
 ///
 /// <pre><code>
-/// // Create basic model
-/// Interpreter foo(2, 1);
-/// foo.SetTensorParametersReadWrite(0, ...);
-/// foo.SetTensorParametersReadOnly(1, ...);
-/// foo.SetNodeParameters(0, ...)
-/// // Resize input array to 1 length.
-/// foo.ResizeInputTensor(0, 1);
-/// foo.AllocateTensors();
-/// // Install array data
-/// foo.typed_tensor<float>(0)[0] = 3;
-/// foo.Invoke();
-/// foo.typed_tensor<float>(0)[0] = 4;
-/// foo.Invoke();
-/// // Resize input array and set data.
-/// foo.ResizeInputTensor(0, 2);
-/// foo.AllocateTensors();
-/// foo.typed_tensor<float>(0)[0] = 4;
-/// foo.typed_tensor<float>(0)[1] = 8;
-/// foo.Invoke();
+/// // Create model from file. Note that the model instance must outlive the
+/// // interpreter instance.
+/// auto model = tflite::FlatBufferModel::BuildFromFile(...);
+/// if (model == nullptr) {
+///   // Return error.
+/// }
+/// // Create an Interpreter with an InterpreterBuilder.
+/// std::unique_ptr<tflite::Interpreter> interpreter;
+/// tflite::ops::builtin::BuiltinOpResolver resolver;
+/// if (InterpreterBuilder(*model, resolver)(&interpreter) != kTfLiteOk) {
+///   // Return failure.
+/// }
+/// interpreter->AllocateTensors();
+///
+/// auto input = interpreter->typed_tensor<float>(0);
+/// for (int i = 0; i < input_size; i++) {
+///   input[i] = ...;
+//  }
+/// interpreter.Invoke();
 /// </code></pre>
 ///
+/// Note: for nearly all practical use cases, one should not directly construct
+/// an Interpreter object, but rather use the InterpreterBuilder.
 
 class Interpreter {
  public:
-  /// Instantiate an interpreter. All errors associated with reading and
-  /// processing this model will be forwarded to the error_reporter object.
+  // Instantiate an interpreter. All errors associated with reading and
+  // processing this model will be forwarded to the error_reporter object.
   //
-  /// Note, if error_reporter is nullptr, then a default StderrReporter is
-  /// used. Ownership of 'error_reporter' remains with the caller.
+  // Note, if error_reporter is nullptr, then a default StderrReporter is
+  // used. Ownership of 'error_reporter' remains with the caller.
+  // WARNING: Use of this constructor outside of an InterpreterBuilder is not
+  // recommended.
   explicit Interpreter(ErrorReporter* error_reporter = DefaultErrorReporter());
 
   ~Interpreter();
@@ -369,7 +368,7 @@ class Interpreter {
   /// WARNING: NNAPI cannot be disabled after the graph has been prepared
   /// (via `AllocateTensors`) with NNAPI enabled.
   ///
-  /// NOTE: This API is deprecated, prefer using the NNAPI delegate directly.
+  /// WARNING: This API is deprecated, prefer using the NNAPI delegate directly.
   /// This method will be removed in a future release.
   void UseNNAPI(bool enable);
 
@@ -381,8 +380,12 @@ class Interpreter {
   TfLiteStatus SetNumThreads(int num_threads);
 
   /// Allow float16 precision for FP32 calculation when possible.
-  /// default: not allow.
-  /// WARNING: This is an experimental API and subject to change.
+  /// Default: not allow.
+  ///
+  /// WARNING: This API is deprecated: prefer controlling this via delegate
+  /// options, e.g. `tflite::StatefulNnApiDelegate::Options::allow_fp16' or
+  /// `TfLiteGpuDelegateOptionsV2::is_precision_loss_allowed`.
+  /// This method will be removed in a future release.
   void SetAllowFp16PrecisionForFp32(bool allow);
 
   /// Get the half precision flag.
@@ -409,7 +412,11 @@ class Interpreter {
   /// 2. kTfLiteDelegateError: Delegation failed due to an error in the
   /// delegate. The Interpreter has been restored to its pre-delegation state.
   /// NOTE: This undoes all delegates previously applied to the Interpreter.
-  /// 3. kTfLiteError: Unexpected/runtime failure.
+  /// 3. kTfLiteApplicationError : Delegation failed to be applied due to the
+  /// incompatibility with the TfLite runtime, e.g., the model graph is already
+  /// immutable when applying the delegate. However, the interpreter could still
+  /// be invoked.
+  /// 4. kTfLiteError: Unexpected/runtime failure.
   /// WARNING: This is an experimental API and subject to change.
   TfLiteStatus ModifyGraphWithDelegate(TfLiteDelegate* delegate);
 
@@ -418,10 +425,29 @@ class Interpreter {
       std::unique_ptr<TfLiteDelegate, void (*)(TfLiteDelegate*)>;
 
   /// Same as ModifyGraphWithDelegate except this interpreter takes
-  /// ownership of the provided delegate. Be sure to construct the unique_ptr
-  /// with a suitable destruction function.
+  /// ownership of the provided delegate.
   /// WARNING: This is an experimental API and subject to change.
-  TfLiteStatus ModifyGraphWithDelegate(TfLiteDelegatePtr delegate);
+  template <typename Delegate, typename Deleter>
+  inline TfLiteStatus ModifyGraphWithDelegate(
+      std::unique_ptr<Delegate, Deleter> delegate) {
+    Deleter deleter = std::move(delegate.get_deleter());
+
+    // Note that we retain ownership of the delegate even if graph modification
+    // fails, as delegate use will be in an indeterminate state at that point.
+    owned_delegates_.emplace_back(
+        delegate.release(), [deleter](TfLiteDelegate* delegate_to_delete) {
+          deleter(
+              static_cast<typename std::unique_ptr<Delegate, Deleter>::pointer>(
+                  delegate_to_delete));
+        });
+    return ModifyGraphWithDelegate(owned_delegates_.back().get());
+  }
+
+  /// This overload is *never* OK. TfLiteDelegate is a C structure, so it has no
+  /// virtual destructor. The default deleter of the unique_ptr does not know
+  /// how to delete C++ objects deriving from TfLiteDelegate.
+  TfLiteStatus ModifyGraphWithDelegate(
+      std::unique_ptr<TfLiteDelegate> delegate) = delete;
 
   /// Ensure the data in `tensor.data` is readable. In case delegate is used,
   /// it might require to copy the data from delegate buffer to raw memory.
@@ -514,8 +540,8 @@ class Interpreter {
   // for the tensor, it can no longer be reset to the TFLite arena memory.
   //
   // Parameters should satisfy the following conditions:
-  // 1. tensor->allocation_type == kTfLiteArenaRw
-  //    In general, this is true for all non-constants such as I/O tensors.
+  // 1. tensor->allocation_type == kTfLiteArenaRw or kTfLiteArenaRwPersistent
+  //    In general, this is true for I/O tensors & variable tensors.
   // 2. allocation->data has the appropriate permissions for runtime access
   //    (Read-only for inputs, Read-Write for others), and outlives Interpreter.
   // 3. allocation->bytes >= tensor->bytes.
@@ -558,6 +584,11 @@ class Interpreter {
   const Subgraph& primary_subgraph() const {
     return *subgraphs_.front();  // Safe as subgraphs_ always has 1 entry.
   }
+
+  /// WARNING: Experimental interface, subject to change
+  // Get the error reporter associated with this interpreter.
+  ErrorReporter* error_reporter() const { return error_reporter_; }
+
 #endif  // DOXYGEN_SKIP
 
  private:
@@ -584,9 +615,6 @@ class Interpreter {
   // Returns true if cancellation function returns true.
   bool IsCancelled();
 
-  // Get the error reporter associated with this interpreter.
-  ErrorReporter* error_reporter() { return error_reporter_; }
-
   // A pure C data structure used to communicate with the pure C plugin
   // interface. To avoid copying tensor metadata, this is also the definitive
   // structure to store tensors.
@@ -600,7 +628,9 @@ class Interpreter {
   // interpreter instance. Useful if client delegate ownership is burdensome.
   // WARNING: This is an experimental API and subject to change.
   // TODO(b/116667551): Use TfLiteExternalContext for storing state.
-  std::vector<TfLiteDelegatePtr> owned_delegates_;
+  std::vector<
+      std::unique_ptr<TfLiteDelegate, std::function<void(TfLiteDelegate*)>>>
+      owned_delegates_;
 
   // Profiler that has been installed and is owned by this interpreter instance.
   // Useful if client profiler ownership is burdensome.
@@ -627,19 +657,11 @@ class Interpreter {
   // A map of resources. Owned by interpreter and shared by multiple subgraphs.
   resource::ResourceMap resources_;
 
-  // Indicating a delegate that the TFLite interpreter will apply by default.
-  // A nullptr value means there's no delegate to be applied by default or the
-  // delegate has been applied and doesn't need to be applied again.
-  TfLiteDelegatePtr lazy_delegate_provider_;
+  // Indicating delegates that the TFLite interpreter will apply by default.
+  // An empty one means there's no delegate to be applied by default or
+  // delegates have been applied and doesn't need to be applied again.
+  std::vector<TfLiteDelegatePtr> lazy_delegate_providers_;
 };
-
-}  // namespace impl
-
-#if TFLITE_EXPERIMENTAL_RUNTIME_EAGER
-using Interpreter = tflrt::EagerInterpreter;
-#else
-using Interpreter = impl::Interpreter;
-#endif
 
 }  // namespace tflite
 #endif  // TENSORFLOW_LITE_INTERPRETER_H_
